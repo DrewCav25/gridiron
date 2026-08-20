@@ -4,7 +4,7 @@ Fantasy football projections trained on 14 seasons of nflverse data, forecast as
 
 Most public fantasy tooling consumes third-party projections and averages them. This builds the model underneath, and — more importantly — reports honestly on where it works and where it doesn't.
 
-**Status:** Phases 0–2 complete (data pipeline, scoring engine, baselines, first models, calibration). Draft optimizer is next.
+**Status:** Phases 0–3 complete (data pipeline, scoring engine, baselines, quantile models, calibration, offseason features). Calibration fix and draft optimizer are next.
 
 ---
 
@@ -58,7 +58,43 @@ This is a real result, not a bug, and it points directly at the actual problem: 
 
 That is why human consensus projections beat naive persistence: humans encode the offseason. Closing that gap is the actual work, and the roadmap below is built around it.
 
-### 3. The quantile model is overconfident
+### 3. Adding offseason information closes the gap
+
+Finding #2 was a hypothesis about *why* the model lost, so Phase 3 tested it directly: add the things that happen between seasons and nothing else.
+
+- **team change** entering the season (week-1 roster)
+- **incoming draft capital at the player's position** — the earliest pick his new team spent on his position in that April's draft
+- **new team's prior-season offensive profile**, and the delta from his old team's (pass rate, attempts per game, offensive TDs)
+- **head coaching change**
+- **week-1 depth chart position**
+
+Same model, same hyperparameters, same walk-forward split. Only the feature set changed:
+
+| Position | Persistence | GBM, lags only | **GBM + offseason** |
+|---|---|---|---|
+| QB | 0.574 | 0.584 | **0.671** |
+| RB | 0.639 | 0.602 | **0.662** |
+| TE | 0.655 | 0.602 | **0.671** |
+| WR | 0.679 | 0.674 | **0.728** |
+
+*(Spearman rank correlation, walk-forward 2018–2025, within season and position.)*
+
+The model now beats persistence at **all four positions**, and beats its own lag-only version by 0.05–0.09 — a far larger jump than any amount of hyperparameter tuning produced. MAE improves everywhere too. The diagnosis in finding #2 was correct: the missing information was never in the box scores.
+
+Offseason features account for **16% of total model gain** despite being 16 of 90 features. The largest single one is depth chart position, at 6.5% gain — fourth most important feature overall, behind only the three prior-season scoring columns.
+
+**The honest caveat.** Week-1 depth charts publish just before the season, which can be *after* an August fantasy draft. Stripping them out to simulate strict draft-day information:
+
+| Position | Persistence | GBM, strict draft-day |
+|---|---|---|
+| QB | 0.574 | **0.625** |
+| RB | 0.639 | 0.626 |
+| TE | 0.655 | 0.630 |
+| WR | 0.679 | **0.697** |
+
+Without the depth chart the result is mixed — clear wins at QB and WR, marginal losses at RB and TE. So the headline "beats persistence everywhere" depends on information you may not have on draft day. Both variants ship (`include_depth_chart=False`) and both are reported, because quoting only the better one would misrepresent what the model can do when you actually need it.
+
+### 4. The quantile model is overconfident
 
 Predicting p10/p25/p50/p75/p90 per player and checking whether reality lands inside the bands:
 
@@ -81,9 +117,10 @@ src/gridiron/
   data.py        nflreadpy loaders with parquet caching
   scoring.py     fantasy point engine, validated against nflverse
   features.py    lagged player-season panel + stickiness analysis
+  offseason.py   team moves, draft capital, coaching + depth charts
   models.py      GBM point projector + quantile projector
   evaluate.py    walk-forward harness, rank metrics, calibration
-tests/           11 tests, including exact-match scoring validation
+tests/           23 tests — scoring validation and leakage enforcement
 scripts/         run_baselines.py reproduces every number above
 ```
 
@@ -99,10 +136,9 @@ Scoring and league structure are fully configurable — PPR / half / standard, T
 
 **Walk-forward only.** To score season N, train on seasons < N. No random splits anywhere. Shuffling a time series trains on the future, and it is the most common flaw in public fantasy models.
 
-**Leakage rules enforced in `features.build_panel`:**
-- every feature is drawn from season N−1 or earlier
-- age and experience are the only contemporaneous features (both known before kickoff)
-- end-of-season depth charts and final injury designations are excluded
+**Features are allowlisted, not denylisted.** `models.feature_columns` admits exactly three categories — lagged prior-season stats, age/experience, and explicitly vetted offseason features. Anything else joined onto the panel is invisible to the model, and `tests/test_leakage.py::test_no_unvetted_features` fails if someone adds a feature without vetting it. A denylist would silently admit new columns, which is exactly how leakage gets into projects like this.
+
+**Leakage is tested, not asserted.** `tests/test_leakage.py` checks that lag-1 features equal the prior season's value (catching off-by-one join errors, the most damaging and least visible bug available here), that draft capital never comes from a future draft, that team assignment comes from the week-1 roster rather than a later week (which would encode surviving cuts or a midseason trade), and that no feature correlates above 0.95 with the target.
 
 **Rank metrics lead.** Spearman and top-k hit rate are the headline; MAE and RMSE are secondary. You draft an ordering, not a point total.
 
@@ -126,15 +162,11 @@ One caveat: `load_ff_rankings` pulls FantasyPros ECR/ADP from DynastyProcess via
 
 ## Roadmap
 
-**Phase 3 — close the offseason information gap.** This is where the remaining signal is, per finding #2:
-- depth chart position and competition entering the season
-- team changes, and draft capital spent at the player's position
-- coaching and scheme change flags
-- projected team totals and pace
+**~~Phase 3 — close the offseason information gap.~~ Done** — see finding #3.
 
 **Phase 3b — beat the real baseline.** Wire up the ESPN/CBS/NFL consensus via `load_ff_rankings` and compare against it directly. Persistence is the floor; consensus is the target.
 
-**Phase 4 — fix calibration.** Model games-played explicitly as a separate target, then compose the availability distribution with the per-game production distribution rather than predicting season totals directly. Finding #3 says the current approach cannot get coverage right.
+**Phase 4 — fix calibration.** Model games-played explicitly as a separate target, then compose the availability distribution with the per-game production distribution rather than predicting season totals directly. Finding #4 says the current approach cannot get coverage right. The quantile models do not yet use the offseason features either, which should tighten the median even if it doesn't fix coverage.
 
 **Phase 5 — the draft optimizer.** Greedy VOR is myopic: at pick 15 you want the pick that maximizes expected final *starting lineup* value given who will survive to picks 34 and 39, not the highest VOR available now. Monte Carlo rollouts with ADP-based opponent models, evaluated over 10,000 simulated drafts against greedy-VOR and ADP-following agents.
 
