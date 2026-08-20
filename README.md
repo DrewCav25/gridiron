@@ -4,7 +4,7 @@ Fantasy football projections trained on 14 seasons of nflverse data, forecast as
 
 Most public fantasy tooling consumes third-party projections and averages them. This builds the model underneath, and — more importantly — reports honestly on where it works and where it doesn't.
 
-**Status:** Phases 0–3 complete (data pipeline, scoring engine, baselines, quantile models, calibration, offseason features). Calibration fix and draft optimizer are next.
+**Status:** Phases 0–4 complete — data pipeline, scoring engine, baselines, offseason features, and calibrated distributional projections. Draft optimizer is next.
 
 ---
 
@@ -94,18 +94,44 @@ Offseason features account for **16% of total model gain** despite being 16 of 9
 
 Without the depth chart the result is mixed — clear wins at QB and WR, marginal losses at RB and TE. So the headline "beats persistence everywhere" depends on information you may not have on draft day. Both variants ship (`include_depth_chart=False`) and both are reported, because quoting only the better one would misrepresent what the model can do when you actually need it.
 
-### 4. The quantile model is overconfident
+### 4. The quantile model was overconfident — three fixes, only the third worked
 
-Predicting p10/p25/p50/p75/p90 per player and checking whether reality lands inside the bands:
+Predicting p10/p25/p50/p75/p90 season totals directly and checking whether reality lands inside the bands gave **0.605 coverage on p10–p90 against a target of 0.80**, and 0.332 on p25–p75 against 0.50. Badly overconfident.
 
-| Interval | Observed coverage | Target |
+The cause is structural rather than a tuning problem. Season totals decompose as
+
+```
+total = games_played × points_per_game
+```
+
+and most of the variance is in the first factor — 31% of fantasy-relevant players appear in 8 or fewer games, and availability has a standard deviation of about 5 games. One model asked to predict season totals has to smear bimodal injury risk into a single conditional distribution, and it hedges toward the middle.
+
+**Fix 1 — model the factors separately and compose them.** Two quantile grids, one over games played and one over points per game, Monte Carlo sampled and multiplied.
+
+**Fix 2 — couple them properly.** Availability and production are not independent: good players both stay on the field and score more. Sampling uses a Gaussian copula whose parameter is estimated from *out-of-sample* PIT values, so it measures the dependence remaining after the features have explained what they can. Fitted ρ ≈ 0.41, stable across seasons.
+
+| Model | p10–p90 coverage | p25–p75 coverage |
 |---|---|---|
-| p10–p90 | **0.621** | 0.80 |
-| p25–p75 | **0.356** | 0.50 |
+| Direct season-total quantiles | 0.605 | 0.332 |
+| Composite, **independent** | 0.582 | 0.347 |
+| Composite, **copula** (ρ≈0.41) | 0.661 | 0.390 |
+| Composite, comonotonic (ρ=0.95) | 0.736 | 0.434 |
 
-The intervals are far too narrow. The cause is structural: season-total variance is dominated by **games missed**, and injury is largely unpredictable from prior-season statistics, so the model systematically understates the spread.
+Two things worth reading off this table. Independent sampling is *worse than doing nothing* — confirming the dependence is real and that ignoring it actively harms the upper tail. And the physically implausible comonotonic assumption scores best of the three, which is itself diagnostic: if cranking dependence past what the data supports keeps improving coverage, the dependence structure was never the whole problem. **The marginals themselves were too narrow.** Gradient boosted quantile regression tends to be overconfident, since predictions get averaged within leaves.
 
-This is exactly why calibration gets reported. Without this check the project would have shipped confident-looking intervals that are wrong by 18 percentage points, and every downstream risk-aware draft decision would have inherited the error.
+**Fix 3 — conformal calibration.** [Conformalized quantile regression](https://arxiv.org/abs/1905.03222) corrects this empirically rather than parametrically: fit on seasons < N−1, measure on season N−1 how far reality actually fell outside the predicted interval, and widen by that amount. No assumption about error shape required.
+
+| Model | p10–p90 | p25–p75 | Mean p10–p90 width |
+|---|---|---|---|
+| Composite + copula | 0.651 | 0.384 | 101.6 |
+| **+ conformal** | **0.784** | **0.491** | 118.7 |
+| *target* | *0.80* | *0.50* | |
+
+Essentially calibrated, at a cost of 17% wider intervals — which is the honest price of intervals that mean what they claim. That tradeoff belongs to the user, not the model, so both are available.
+
+*(The copula row differs slightly between the two tables because the conformal experiment holds out season N−1 for calibration and so trains on one less season.)*
+
+**Caveat on the guarantee.** Split conformal gives finite-sample coverage *under exchangeability*, and NFL seasons are not exchangeable — rule changes, and a 17th game added in 2021. So the guarantee here is approximate. The 0.784 above is measured on held-out seasons rather than assumed from theory, which is the only reason to trust it.
 
 ---
 
@@ -119,9 +145,10 @@ src/gridiron/
   features.py    lagged player-season panel + stickiness analysis
   offseason.py   team moves, draft capital, coaching + depth charts
   models.py      GBM point projector + quantile projector
+  calibration.py availability x production composition + conformal
   evaluate.py    walk-forward harness, rank metrics, calibration
-tests/           23 tests — scoring validation and leakage enforcement
-scripts/         run_baselines.py reproduces every number above
+tests/           33 tests — scoring, leakage, and sampler correctness
+scripts/         run_baselines.py, eval_calibration.py, eval_conformal.py
 ```
 
 ### The scoring engine is validated, not assumed
@@ -151,7 +178,10 @@ Scoring and league structure are fully configurable — PPR / half / standard, T
 ```bash
 pip install -e ".[dev]"
 python scripts/run_baselines.py      # downloads + caches ~14 seasons, then reproduces the tables
-pytest
+python scripts/eval_conformal.py     # Phase 4 calibration results
+
+pytest -m "not slow"                 # fast suite, ~30s
+pytest                               # full suite incl. calibration, ~7min
 ```
 
 Data comes from **`nflreadpy`**. Note that the widely-tutorialized `nfl_data_py` package is [officially deprecated](https://github.com/nflverse/nfl_data_py) in favour of it. `nflreadpy` returns Polars frames rather than pandas.
@@ -166,9 +196,9 @@ One caveat: `load_ff_rankings` pulls FantasyPros ECR/ADP from DynastyProcess via
 
 **Phase 3b — beat the real baseline.** Wire up the ESPN/CBS/NFL consensus via `load_ff_rankings` and compare against it directly. Persistence is the floor; consensus is the target.
 
-**Phase 4 — fix calibration.** Model games-played explicitly as a separate target, then compose the availability distribution with the per-game production distribution rather than predicting season totals directly. Finding #4 says the current approach cannot get coverage right. The quantile models do not yet use the offseason features either, which should tighten the median even if it doesn't fix coverage.
+**~~Phase 4 — fix calibration.~~ Done** — see finding #4. Coverage went 0.605 → 0.784 against a 0.80 target.
 
-**Phase 5 — the draft optimizer.** Greedy VOR is myopic: at pick 15 you want the pick that maximizes expected final *starting lineup* value given who will survive to picks 34 and 39, not the highest VOR available now. Monte Carlo rollouts with ADP-based opponent models, evaluated over 10,000 simulated drafts against greedy-VOR and ADP-following agents.
+**Phase 5 — the draft optimizer.** Now unblocked, and it needs the calibrated distributions from Phase 4: a risk-aware drafter optimizing for p10 (safe roster) or p90 (upside roster) is only meaningful if those quantiles are honest.  Greedy VOR is myopic: at pick 15 you want the pick that maximizes expected final *starting lineup* value given who will survive to picks 34 and 39, not the highest VOR available now. Monte Carlo rollouts with ADP-based opponent models, evaluated over 10,000 simulated drafts against greedy-VOR and ADP-following agents.
 
 **Phase 6 — ship it.** CLI, live draft mode, Sleeper API sync, deployed demo.
 

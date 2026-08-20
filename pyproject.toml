@@ -26,6 +26,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "slow: fits many quantile models; excluded from the fast CI run",
+]
 
 [tool.ruff]
 line-length = 100
