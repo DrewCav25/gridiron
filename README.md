@@ -4,7 +4,7 @@ Fantasy football projections trained on 14 seasons of nflverse data, forecast as
 
 Most public fantasy tooling consumes third-party projections and averages them. This builds the model underneath, and — more importantly — reports honestly on where it works and where it doesn't.
 
-**Status:** Complete through Phase 6. Projections, calibration, a distribution-aware draft optimizer, a CLI, and a live projections page.
+**Status:** Complete through Phase 6, plus external benchmarking. Projections, calibration, a distribution-aware draft optimizer, a CLI, a live projections page, and comparison against published boards.
 
 **[Live 2026 projections →](https://drewcav25.github.io/gridiron/)**
 
@@ -217,8 +217,9 @@ src/gridiron/
   predict.py     forward projections for an upcoming season
   sleeper.py     league scoring + roster sync from a Sleeper league id
   report.py      self-contained HTML report for GitHub Pages
-  cli.py         gridiron project / draft / sleeper / export
-tests/           88 tests — scoring, leakage, samplers, draft, shipping
+  espn.py        external ranking baselines (PDF / xlsx / csv / pasted)
+  cli.py         gridiron project / draft / compare / sleeper / export
+tests/           113 tests — scoring, leakage, samplers, draft, shipping
 scripts/         run_baselines / eval_calibration / eval_conformal /
                  eval_draft / eval_draft_distribution
 docs/            generated projections page (GitHub Pages)
@@ -229,6 +230,67 @@ docs/            generated projections page (GitHub Pages)
 `tests/test_scoring.py` checks the standard and PPR presets against nflverse's own `fantasy_points` and `fantasy_points_ppr` columns across **37,626 player-weeks**. Maximum deviation: **0.0000**. Every number in this repo sits on top of that, so it is tested first.
 
 Scoring and league structure are fully configurable — PPR / half / standard, TE premium, yardage bonuses, team count, superflex. Replacement level for VOR is derived from league settings rather than assumed, because a 10-team league and a 14-team league have very different replacement levels.
+
+### 7. Benchmarked against two human sources — and a scoring-format lesson
+
+Finding #2 named the consensus as the real target but never reached it: the nflverse route to published rankings is unreachable from some networks. Two 2026 boards — ESPN's PPR draft-kit cheat sheet and RotoWire's Top 250 — closed that gap.
+
+**First, a correction to my own earlier reading.** The model looked badly wrong on Jahmyr Gibbs, ranking him RB7 behind Josh Jacobs while every board had him RB1. Most of that was a **scoring-format mismatch, not a model flaw**: the projections were half-PPR, the boards were PPR. Regenerated at matched PPR, Gibbs is RB1–RB2 and Jacobs falls to RB6–RB7 — near-agreement. Gibbs saw 94 targets to Jacobs's 44, and full PPR doubles what that gap is worth. The lesson is one the codebase was already built for and I still tripped over: **compare like for like, or the scoring config silently becomes the finding.**
+
+A real bias survives the correction, though. Backtest residuals for RBs by prior-season target-share quartile:
+
+| Target share | Mean residual |
+|---|---|
+| Q1 (lowest) | −0.1 |
+| Q2 | +3.9 |
+| Q3 | +6.8 |
+| **Q4 (highest)** | **+10.8** |
+
+Monotone: the model **under-projects high-usage backs by ~11 points a season**, and over-regresses workhorses generally.
+
+**Agreement with each source, within position:**
+
+| Position | vs ESPN | vs RotoWire |
+|---|---|---|
+| RB | 0.896 | 0.877 |
+| WR | 0.881 | 0.887 |
+| QB | 0.784 | 0.694 |
+| TE | 0.756 | 0.672 |
+
+**The number that makes those interpretable** is how much the two human sources agree with *each other* — the consensus ceiling:
+
+| Position | ESPN vs RotoWire | Model vs their consensus |
+|---|---|---|
+| RB | **0.978** | 0.892 |
+| WR | **0.962** | 0.890 |
+| QB | **0.955** | 0.708 |
+| TE | **0.912** | 0.687 |
+
+Two professional boards agree with each other at 0.91–0.98. The model agrees with their consensus at 0.69–0.89. So it is **a genuinely independent opinion rather than a consensus clone** — but it is also markedly more idiosyncratic than the professionals are with one another, especially at QB and TE.
+
+That gap is either alpha or error, and **nothing here can tell you which.** Comparing 2026 projections to 2026 rankings measures *agreement*, not accuracy — neither side has outcomes yet. Establishing which is more accurate needs a source's *historical* rankings against known results, which remains the open item from finding #2.
+
+**Where the model most disagrees with ESPN** (positive = we rank higher):
+
+| Player | Pos | Ours | ESPN | Δ |
+|---|---|---|---|---|
+| Brian Thomas Jr. | WR | 11 | 38 | **+27** |
+| Tre Tucker | WR | 31 | 55 | +24 |
+| James Conner | RB | 40 | 63 | +23 |
+| Alvin Kamara | RB | 20 | 40 | +20 |
+| Matthew Golden | WR | 60 | 36 | **−24** |
+| Bhayshul Tuten | RB | 44 | 21 | −23 |
+| Marvin Harrison Jr. | WR | 52 | 30 | −22 |
+| Keaton Mitchell | RB | 66 | 45 | −21 |
+
+The disagreements have a readable shape. Where analysts rank a player far above the model — Tuten, Golden, Harrison — they are usually pricing an *expected role change* that no prior-season stat line contains. Where the model ranks higher, it is usually refusing to discount a player the market has soured on. That is the finding #2 gap reappearing from the other side: humans encode the offseason, and the model only encodes the parts of it that are countable.
+
+**Reproduce:**
+
+```bash
+gridiron compare --season 2026 --scoring ppr --source data/espn_2026_ppr_cheatsheet.pdf
+gridiron compare --season 2026 --scoring ppr --source data/rotowire_2026_ppr_top250.xlsx
+```
 
 ---
 
@@ -246,6 +308,9 @@ gridiron sleeper --league-id 123456789012345678
 
 # Draft assistant: hold the board, get recommendations with reasoning
 gridiron draft --season 2026 --teams 12 --pick 7
+
+# Benchmark against a published board (PDF cheat sheet, xlsx, or csv)
+gridiron compare --season 2026 --scoring ppr --source data/espn_2026_ppr_cheatsheet.pdf
 
 # Regenerate the projections page
 gridiron export --season 2026 --out docs/index.html
@@ -316,7 +381,7 @@ One caveat: `load_ff_rankings` pulls FantasyPros ECR/ADP from DynastyProcess via
 
 **~~Phase 6 — ship it.~~ Done** — CLI, draft assistant, Sleeper sync, and a [live projections page](https://drewcav25.github.io/gridiron/).
 
-**Next.** A rookie model (draft capital + college production), real ADP once `load_ff_rankings` is reachable, and per-week rather than per-season projections.
+**Next.** Historical consensus rankings, so the comparison in finding #7 can measure accuracy rather than agreement. Then a rookie model (draft capital + college production), a monotonic usage constraint to fix the bias in finding #7, and per-week rather than per-season projections.
 
 ### Known limitations
 

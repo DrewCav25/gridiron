@@ -226,6 +226,38 @@ def cmd_sleeper(args: argparse.Namespace) -> int:
 # export
 # --------------------------------------------------------------------------
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    from .espn import agreement, biggest_disagreements, compare, load_external, parse_cheat_sheet
+
+    scoring = SCORING_PRESETS[args.scoring]()
+    source = str(args.source)
+    external = (
+        parse_cheat_sheet(source) if source.lower().endswith(".pdf")
+        else load_external(source)
+    )
+    ours = project_season(args.season, scoring=scoring,
+                          include_depth_chart=args.depth_chart)
+    c = compare(ours, external)
+
+    print(f"matched {c.height} of {external.height} external entries "
+          f"({c.height / external.height:.0%})\n")
+    print("=== Rank agreement, within position ===")
+    pl.Config.set_tbl_rows(10)
+    print(agreement(c))
+    print("\n=== Biggest disagreements ===")
+    pl.Config.set_tbl_rows(2 * args.top)
+    pl.Config.set_fmt_str_lengths(22)
+    cols = ["player_display_name", "position", "team",
+            "our_rank", "their_rank", "rank_delta", "projected_points"]
+    print(biggest_disagreements(c, n=args.top).select(
+        [x for x in cols if x in c.columns]
+    ))
+    if args.out:
+        c.write_csv(args.out)
+        print(f"\nwrote comparison to {args.out}")
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from .report import write_report
 
@@ -272,6 +304,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("sleeper", help="read scoring + roster from a Sleeper league")
     p.add_argument("--league-id", required=True)
     p.set_defaults(func=cmd_sleeper)
+
+    p = common(sub.add_parser("compare", help="compare against an external source"))
+    p.add_argument("--source", required=True,
+                   help="ESPN cheat-sheet PDF, or a CSV/text projections export")
+    p.add_argument("--top", type=int, default=12)
+    p.add_argument("--out", help="write the full comparison to CSV")
+    p.set_defaults(func=cmd_compare)
 
     p = common(sub.add_parser("export", help="write a static HTML report"))
     p.add_argument("--out", default="docs/index.html")
