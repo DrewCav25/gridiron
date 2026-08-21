@@ -20,6 +20,11 @@ CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
 # nflverse coverage. Play-by-play, weekly stats, rosters and schedules go
 # back to 1999; snap counts start in 2012; ff_opportunity in 2006.
 FIRST_SEASON = 1999
+
+# nflverse publishes weekly stats only for completed seasons. Anything
+# after this is an upcoming season: rosters, schedules and draft picks
+# exist, but no games have been played.
+LAST_COMPLETED_SEASON = 2025
 FIRST_SNAP_COUNT_SEASON = 2012
 FIRST_FF_OPPORTUNITY_SEASON = 2006
 

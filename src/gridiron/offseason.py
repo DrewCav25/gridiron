@@ -48,7 +48,25 @@ def preseason_team(seasons: list[int], refresh: bool = False) -> pl.DataFrame:
     a mid-season or end-of-season team would leak: it would encode that the
     player survived roster cuts or was traded to a contender.
     """
-    rosters = D.load_rosters_weekly(seasons, refresh=refresh)
+    # rosters_weekly only covers completed seasons. For an upcoming season
+    # (no games played yet) fall back to the preseason season-roster table,
+    # which is exactly the right source for a draft-day projection.
+    past = [s for s in seasons if s <= D.LAST_COMPLETED_SEASON]
+    future = [s for s in seasons if s > D.LAST_COMPLETED_SEASON]
+
+    frames = []
+    if future:
+        frames.append(
+            D.load_rosters(future, refresh=refresh).select(
+                pl.col("gsis_id").alias("player_id"),
+                "season",
+                pl.col("team").alias("team_current"),
+            ).drop_nulls("player_id")
+        )
+    if not past:
+        return pl.concat(frames).unique(subset=["player_id", "season"], keep="first")
+
+    rosters = D.load_rosters_weekly(past, refresh=refresh)
     wk1 = (
         rosters.filter((pl.col("week") == 1) & (pl.col("game_type") == "REG"))
         .select(
@@ -57,9 +75,9 @@ def preseason_team(seasons: list[int], refresh: bool = False) -> pl.DataFrame:
             pl.col("team").alias("team_current"),
         )
         .drop_nulls("player_id")
-        .unique(subset=["player_id", "season"], keep="first")
     )
-    return wk1
+    frames.append(wk1)
+    return pl.concat(frames).unique(subset=["player_id", "season"], keep="first")
 
 
 def team_context(seasons: list[int], refresh: bool = False) -> pl.DataFrame:
@@ -71,7 +89,12 @@ def team_context(seasons: list[int], refresh: bool = False) -> pl.DataFrame:
     """
     import nflreadpy as nfl
 
-    yrs = sorted(set(seasons))
+    # Context for season N is season N-1's team profile, so only completed
+    # seasons are ever needed. Requesting an upcoming season here 404s —
+    # those stats do not exist yet by definition.
+    yrs = [s for s in sorted(set(seasons)) if s <= D.LAST_COMPLETED_SEASON]
+    if not yrs:
+        return pl.DataFrame()
     key = f"teamstats_{yrs[0]}_{yrs[-1]}"
     ts = D.cached(
         key,

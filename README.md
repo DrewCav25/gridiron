@@ -4,7 +4,9 @@ Fantasy football projections trained on 14 seasons of nflverse data, forecast as
 
 Most public fantasy tooling consumes third-party projections and averages them. This builds the model underneath, and — more importantly — reports honestly on where it works and where it doesn't.
 
-**Status:** Phases 0–5b complete — data pipeline, scoring engine, baselines, offseason features, calibrated distributional projections, and a distribution-aware sequential draft optimizer.
+**Status:** Complete through Phase 6. Projections, calibration, a distribution-aware draft optimizer, a CLI, and a live projections page.
+
+**[Live 2026 projections →](https://drewcav25.github.io/gridiron/)**
 
 ---
 
@@ -212,9 +214,14 @@ src/gridiron/
   calibration.py availability x production composition + conformal
   draft.py       VOR, snake draft simulator, and drafting agents
   evaluate.py    walk-forward harness, rank metrics, calibration
-tests/           65 tests — scoring, leakage, samplers, draft mechanics
+  predict.py     forward projections for an upcoming season
+  sleeper.py     league scoring + roster sync from a Sleeper league id
+  report.py      self-contained HTML report for GitHub Pages
+  cli.py         gridiron project / draft / sleeper / export
+tests/           88 tests — scoring, leakage, samplers, draft, shipping
 scripts/         run_baselines / eval_calibration / eval_conformal /
                  eval_draft / eval_draft_distribution
+docs/            generated projections page (GitHub Pages)
 ```
 
 ### The scoring engine is validated, not assumed
@@ -222,6 +229,42 @@ scripts/         run_baselines / eval_calibration / eval_conformal /
 `tests/test_scoring.py` checks the standard and PPR presets against nflverse's own `fantasy_points` and `fantasy_points_ppr` columns across **37,626 player-weeks**. Maximum deviation: **0.0000**. Every number in this repo sits on top of that, so it is tested first.
 
 Scoring and league structure are fully configurable — PPR / half / standard, TE premium, yardage bonuses, team count, superflex. Replacement level for VOR is derived from league settings rather than assumed, because a 10-team league and a 14-team league have very different replacement levels.
+
+---
+
+## Using it
+
+```bash
+pip install -e .
+
+# Season projections, any scoring format
+gridiron project --season 2026 --position RB --top 25
+gridiron project --season 2026 --scoring ppr --out projections.csv
+
+# Match your actual league
+gridiron sleeper --league-id 123456789012345678
+
+# Draft assistant: hold the board, get recommendations with reasoning
+gridiron draft --season 2026 --teams 12 --pick 7
+
+# Regenerate the projections page
+gridiron export --season 2026 --out docs/index.html
+```
+
+`draft` is the one that matters on draft day. Type a name to take a player
+off the board, `+name` to add one to your roster, and it re-ranks with the
+reasoning shown — projected points, value over replacement, and the
+offseason flags driving the number:
+
+```
+ 1. Josh Jacobs             RB  GB   233 projected; +71 over replacement (162 at RB)  <-- recommended
+ 2. Ashton Jeanty           RB  LV   218 projected; +47 over replacement (162 at RB); team drafted RB at pick 6
+ 3. Jaxon Smith-Njigba      WR  SEA  250 projected; +43 over replacement (207 at WR)
+```
+
+Projections for an upcoming season exclude week-1 depth charts by default,
+since those often publish after August drafts — pass `--depth-chart` to
+include them and get the more accurate variant from finding #3.
 
 ---
 
@@ -271,7 +314,9 @@ One caveat: `load_ff_rankings` pulls FantasyPros ECR/ADP from DynastyProcess via
 
 **~~Phase 5b — distribution-aware rollouts.~~ Done** — see finding #6. The edge returned: −15.8 → +94.9 points/season.
 
-**Phase 6 — ship it.** CLI, live draft mode with reasoning shown, Sleeper API sync, deployed demo.
+**~~Phase 6 — ship it.~~ Done** — CLI, draft assistant, Sleeper sync, and a [live projections page](https://drewcav25.github.io/gridiron/).
+
+**Next.** A rookie model (draft capital + college production), real ADP once `load_ff_rankings` is reachable, and per-week rather than per-season projections.
 
 ### Known limitations
 
